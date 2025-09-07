@@ -132,7 +132,7 @@
             float intensity = 1.0 - smoothstep(0.0, u_radius, dist);
             
             // Mix the old velocity with the mouse velocity for a drag effect
-            vec2 new_vel = mix(old_vel, u_mouse_velocity, intensity);
+            vec2 new_vel = mix(old_vel, old_vel + u_mouse_velocity, intensity);
             gl_FragColor = vec4(new_vel, 0.0, 1.0);
         }
     </script>
@@ -255,6 +255,17 @@
         import GUI from 'lil-gui';
 
         // --- Simulation Parameters ---
+        const default_colors = {
+            mouse: { r: 0.2, g: 0.5, b: 1.0 },
+            touches: [
+                { r: 1.0, g: 0.1, b: 0.1 }, // Red
+                { r: 0.1, g: 1.0, b: 0.1 }, // Green
+                { r: 0.1, g: 0.5, b: 1.0 }, // Blue
+                { r: 1.0, g: 1.0, b: 0.1 }, // Yellow
+                { r: 1.0, g: 0.1, b: 1.0 }, // Magenta
+            ]
+        };
+        
         const sim_params = {
             dt: 0.035,
             pressure_iterations: 50,
@@ -262,7 +273,8 @@
             decay: 0.99,
             vorticity: 0.2,
             dissipation: 0.991,
-            color: { r: 0.2, g: 0.5, b: 1.0 }, // Color for splats
+            mouse_color: { ...default_colors.mouse },
+            touch_colors: default_colors.touches.map(c => ({...c})),
         };
 
         // --- Basic Setup ---
@@ -379,7 +391,7 @@
                 u_target: { value: null },
                 u_mouse_pos: { value: new THREE.Vector2(0, 0) },
                 u_radius: { value: sim_params.force_radius },
-                u_color: { value: new THREE.Color(sim_params.color.r, sim_params.color.g, sim_params.color.b) },
+                u_color: { value: new THREE.Color() }, // Color is set per-pointer
                 u_resolution: { value: new THREE.Vector2(grid_width, grid_height) },
             }
         });
@@ -438,6 +450,13 @@
         // --- UI Controls ---
         const gui = new GUI();
 
+        function refreshGUI() {
+            gui.controllers.forEach(c => c.updateDisplay());
+            gui.folders.forEach(folder => {
+                folder.controllers.forEach(c => c.updateDisplay());
+            });
+        }
+
         function resetSimulation() {
             clearAllRenderTargets();
             // Reset params to defaults
@@ -447,7 +466,12 @@
             sim_params.decay = 0.99;
             sim_params.vorticity = 0.2;
             sim_params.dissipation = 0.991;
-            sim_params.color = { r: 0.2, g: 0.5, b: 1.0 };
+            
+            // Reset colors
+            Object.assign(sim_params.mouse_color, default_colors.mouse);
+            sim_params.touch_colors.forEach((_, i) => {
+                Object.assign(sim_params.touch_colors[i], default_colors.touches[i]);
+            });
 
             // Manually update shader uniforms
             advection_material.uniforms.u_dt.value = sim_params.dt;
@@ -457,10 +481,8 @@
             decay_material.uniforms.u_decay.value = sim_params.decay;
             dissipation_material.uniforms.u_dissipation.value = sim_params.dissipation;
             vorticity_confinement_material.uniforms.u_vorticity_amount.value = sim_params.vorticity;
-            splat_material.uniforms.u_color.value.setRGB(sim_params.color.r, sim_params.color.g, sim_params.color.b);
             
-            // Refresh lil-gui display
-            gui.controllers.forEach(c => c.updateDisplay());
+            refreshGUI();
         }
 
         gui.add(sim_params, 'dt', 0.001, 0.032, 0.001).name('Delta Time').onChange(value => {
@@ -481,39 +503,89 @@
         gui.add(sim_params, 'vorticity', 0, 4, 0.01).name('Vorticity').onChange(value => {
             vorticity_confinement_material.uniforms.u_vorticity_amount.value = value;
         });
-        gui.addColor(sim_params, 'color').name('Color').onChange(value => {
-            splat_material.uniforms.u_color.value.setRGB(value.r, value.g, value.b);
-        });
+        
+        gui.addColor(sim_params, 'mouse_color').name('Mouse Color');
+        
+        const touch_colors_folder = gui.addFolder('Touch Colors');
+        for (let i = 0; i < sim_params.touch_colors.length; i++) {
+            touch_colors_folder.addColor(sim_params.touch_colors, i).name(`Touch Color ${i + 1}`);
+        }
+
         gui.add({ reset: resetSimulation }, 'reset').name('Reset Simulation');
 
 
-        // --- Mouse Interaction ---
-        const mouse = {
-            pos: new THREE.Vector2(0,0),
-            prev_pos: new THREE.Vector2(0,0),
-            force: new THREE.Vector2(0,0),
-            down: false
-        };
-        
+        // --- Pointer Interaction (Mouse & Touch) ---
+        const pointers = new Map();
+        let next_touch_color_index = 0;
+
+        // Mouse Listeners
+        window.addEventListener('mousedown', (e) => {
+            let pointer = pointers.get('mouse');
+            if (!pointer) {
+                pointer = {
+                    pos: new THREE.Vector2(0, 0),
+                    prev_pos: new THREE.Vector2(0, 0),
+                    force: new THREE.Vector2(0, 0),
+                    color: new THREE.Color(),
+                };
+                pointers.set('mouse', pointer);
+            }
+            pointer.down = true;
+            pointer.pos.set(e.clientX, window.innerHeight - e.clientY);
+            pointer.prev_pos.copy(pointer.pos);
+            const guiColor = sim_params.mouse_color;
+            pointer.color.setRGB(guiColor.r, guiColor.g, guiColor.b);
+        });
+
         window.addEventListener('mousemove', (e) => {
-            if (mouse.down) {
-                 mouse.pos.set(
-                    e.clientX,
-                    window.innerHeight - e.clientY // Flip Y-axis to match WebGL/Three.js convention
-                );
+            const pointer = pointers.get('mouse');
+            if (pointer && pointer.down) {
+                pointer.pos.set(e.clientX, window.innerHeight - e.clientY);
             }
         });
-        window.addEventListener('mousedown', (e) => {
-            mouse.down = true;
-            mouse.pos.set(
-                e.clientX,
-                window.innerHeight - e.clientY // Flip Y
-            );
-            mouse.prev_pos.copy(mouse.pos);
-        });
+
         window.addEventListener('mouseup', () => {
-            mouse.down = false;
+            const pointer = pointers.get('mouse');
+            if (pointer) {
+                pointer.down = false;
+            }
         });
+
+        // Touch Listeners
+        function handleTouchEvent(e, isEndEvent) {
+            e.preventDefault(); // Prevent scrolling/zooming
+            for (const touch of e.changedTouches) {
+                const id = touch.identifier;
+                if (isEndEvent) {
+                    pointers.delete(id);
+                    continue;
+                }
+                let pointer = pointers.get(id);
+                if (!pointer) { // New touch
+                    pointer = {
+                        pos: new THREE.Vector2(0, 0),
+                        prev_pos: new THREE.Vector2(0, 0),
+                        force: new THREE.Vector2(0, 0),
+                        color: new THREE.Color(),
+                        down: true,
+                    };
+                    const color_obj = sim_params.touch_colors[next_touch_color_index];
+                    pointer.color.setRGB(color_obj.r, color_obj.g, color_obj.b);
+                    next_touch_color_index = (next_touch_color_index + 1) % sim_params.touch_colors.length;
+                    pointers.set(id, pointer);
+                }
+                pointer.pos.set(touch.clientX, window.innerHeight - touch.clientY);
+                if (e.type === 'touchstart') {
+                    pointer.prev_pos.copy(pointer.pos);
+                }
+            }
+        }
+
+        window.addEventListener('touchstart', (e) => handleTouchEvent(e, false), { passive: false });
+        window.addEventListener('touchmove', (e) => handleTouchEvent(e, false), { passive: false });
+        window.addEventListener('touchend', (e) => handleTouchEvent(e, true), { passive: false });
+        window.addEventListener('touchcancel', (e) => handleTouchEvent(e, true), { passive: false });
+
 
         // --- Render Pass Function ---
         // Helper to perform a single simulation step (render a shader to a render target)
@@ -528,31 +600,32 @@
         function animate() {
             requestAnimationFrame(animate);
             
-            // 1. Add Force & Color (if mouse is down)
-            if (mouse.down) {
-                // Calculate velocity based on mouse movement for a drag effect
-                mouse.force.subVectors(mouse.pos, mouse.prev_pos);
-                mouse.prev_pos.copy(mouse.pos);
+            // 1. Add Forces & Colors from all active pointers
+            pointers.forEach((pointer) => {
+                if (pointer.down) {
+                    pointer.force.subVectors(pointer.pos, pointer.prev_pos);
+                    pointer.prev_pos.copy(pointer.pos);
 
-                // Convert mouse position to simulation grid coordinates
-                const mouse_grid_pos = new THREE.Vector2(
-                    mouse.pos.x * (grid_width / window.innerWidth), 
-                    mouse.pos.y * (grid_height / window.innerHeight)
-                );
+                    const pointer_grid_pos = new THREE.Vector2(
+                        pointer.pos.x * (grid_width / window.innerWidth), 
+                        pointer.pos.y * (grid_height / window.innerHeight)
+                    );
 
-                // Add force to velocity field
-                add_force_material.uniforms.u_velocity.value = velocity_rt_1.texture;
-                add_force_material.uniforms.u_mouse_pos.value = mouse_grid_pos;
-                add_force_material.uniforms.u_mouse_velocity.value = mouse.force;
-                renderPass(add_force_material, velocity_rt_2);
-                [velocity_rt_1, velocity_rt_2] = [velocity_rt_2, velocity_rt_1]; // Swap
+                    // Add force to velocity field
+                    add_force_material.uniforms.u_velocity.value = velocity_rt_1.texture;
+                    add_force_material.uniforms.u_mouse_pos.value = pointer_grid_pos;
+                    add_force_material.uniforms.u_mouse_velocity.value = pointer.force;
+                    renderPass(add_force_material, velocity_rt_2);
+                    [velocity_rt_1, velocity_rt_2] = [velocity_rt_2, velocity_rt_1];
 
-                // Add color to dye field
-                splat_material.uniforms.u_target.value = dye_rt_1.texture;
-                splat_material.uniforms.u_mouse_pos.value = mouse_grid_pos;
-                renderPass(splat_material, dye_rt_2);
-                [dye_rt_1, dye_rt_2] = [dye_rt_2, dye_rt_1]; // Swap
-            }
+                    // Add color to dye field
+                    splat_material.uniforms.u_target.value = dye_rt_1.texture;
+                    splat_material.uniforms.u_mouse_pos.value = pointer_grid_pos;
+                    splat_material.uniforms.u_color.value = pointer.color;
+                    renderPass(splat_material, dye_rt_2);
+                    [dye_rt_1, dye_rt_2] = [dye_rt_2, dye_rt_1];
+                }
+            });
 
             // 2. Advection (move velocity along itself)
             advection_material.uniforms.u_velocity.value = velocity_rt_1.texture;
