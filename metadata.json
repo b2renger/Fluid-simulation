@@ -1,5 +1,5 @@
 {
-  "name": "fluid",
-  "description": "An empty app",
+  "name": "fluid simulation - multi touch",
+  "description": "Vibe coded based on article ",
   "requestFramePermissions": []
 }

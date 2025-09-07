@@ -267,6 +267,7 @@
         };
         
         const sim_params = {
+            resolution: 512,
             dt: 0.035,
             pressure_iterations: 50,
             force_radius: 42.0,
@@ -284,10 +285,9 @@
         renderer.setSize(window.innerWidth, window.innerHeight);
         document.body.appendChild(renderer.domElement);
 
-        const sim_resolution = 512; // Base resolution for the fluid simulation grid
-        const grid_width = sim_resolution;
         // Adjust height to maintain aspect ratio with the display window
-        let grid_height = Math.floor(sim_resolution * (window.innerHeight / window.innerWidth));
+        let grid_width = sim_params.resolution;
+        let grid_height = Math.floor(sim_params.resolution * (window.innerHeight / window.innerWidth));
         
         // --- Render Targets (FBOs) ---
         // These are used to store intermediate calculation results on the GPU
@@ -450,6 +450,36 @@
         // --- UI Controls ---
         const gui = new GUI();
 
+        function updateResolution() {
+            // Update grid dimensions
+            grid_width = sim_params.resolution;
+            grid_height = Math.floor(sim_params.resolution * (window.innerHeight / window.innerWidth));
+
+            // Resize all render targets
+            velocity_rt_1.setSize(grid_width, grid_height);
+            velocity_rt_2.setSize(grid_width, grid_height);
+            pressure_rt_1.setSize(grid_width, grid_height);
+            pressure_rt_2.setSize(grid_width, grid_height);
+            dye_rt_1.setSize(grid_width, grid_height);
+            dye_rt_2.setSize(grid_width, grid_height);
+            divergence_rt.setSize(grid_width, grid_height);
+            vorticity_rt.setSize(grid_width, grid_height);
+
+            // Update resolution uniforms in all materials
+            const newResolution = new THREE.Vector2(grid_width, grid_height);
+            advection_material.uniforms.u_resolution.value = newResolution;
+            divergence_material.uniforms.u_resolution.value = newResolution;
+            pressure_material.uniforms.u_resolution.value = newResolution;
+            gradient_subtract_material.uniforms.u_resolution.value = newResolution;
+            add_force_material.uniforms.u_resolution.value = newResolution;
+            splat_material.uniforms.u_resolution.value = newResolution;
+            vorticity_material.uniforms.u_resolution.value = newResolution;
+            vorticity_confinement_material.uniforms.u_resolution.value = newResolution;
+
+            // Clear everything to reset the simulation state
+            clearAllRenderTargets();
+        }
+
         function refreshGUI() {
             gui.controllers.forEach(c => c.updateDisplay());
             gui.folders.forEach(folder => {
@@ -485,6 +515,7 @@
             refreshGUI();
         }
 
+        gui.add(sim_params, 'resolution', [128, 256, 512, 1024]).name('Resolution').onChange(updateResolution);
         gui.add(sim_params, 'dt', 0.001, 0.032, 0.001).name('Delta Time').onChange(value => {
             advection_material.uniforms.u_dt.value = value;
             vorticity_confinement_material.uniforms.u_dt.value = value;
@@ -553,7 +584,11 @@
 
         // Touch Listeners
         function handleTouchEvent(e, isEndEvent) {
-            e.preventDefault(); // Prevent scrolling/zooming
+            // Prevent default browser actions like scrolling, but only if the touch is not on the GUI.
+            if (!e.target.closest('.lil-gui')) {
+                e.preventDefault();
+            }
+
             for (const touch of e.changedTouches) {
                 const id = touch.identifier;
                 if (isEndEvent) {
@@ -691,7 +726,7 @@
         window.addEventListener('resize', () => {
             renderer.setSize(window.innerWidth, window.innerHeight);
             
-            const new_grid_height = Math.floor(sim_resolution * (window.innerHeight / window.innerWidth));
+            const new_grid_height = Math.floor(sim_params.resolution * (window.innerHeight / window.innerWidth));
             grid_height = new_grid_height;
 
             // Resize all render targets and update resolution uniforms
