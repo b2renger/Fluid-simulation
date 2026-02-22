@@ -6,6 +6,7 @@
         body { margin: 0; overflow: hidden; font-family: sans-serif; }
         canvas { display: block; }
     </style>
+<link rel="stylesheet" href="/index.css">
 </head>
 <body>
     <!-- lil-gui will be injected here -->
@@ -151,8 +152,9 @@
             float dist = distance(vUv * u_resolution, u_mouse_pos);
             float intensity = smoothstep(u_radius, 0.0, dist);
             
-            // Add the new color, weighted by intensity
-            old_value.rgb += u_color * intensity;
+            // Mix the new color with the old color to prevent saturation to white
+            // Using a mix factor allows accumulation but caps at the target color
+            old_value.rgb = mix(old_value.rgb, u_color, intensity * 0.5);
             
             gl_FragColor = old_value;
         }
@@ -239,13 +241,72 @@
         }
     </script>
 
-    <!-- Visualization Shader -->
+    <!-- Bloom Shader (Separable Gaussian Blur) -->
+    <script id="bloomShader" type="x-shader/x-fragment">
+        uniform sampler2D u_image;
+        uniform vec2 u_resolution;
+        uniform vec2 u_direction; // (1, 0) for horizontal, (0, 1) for vertical
+        uniform float u_radius;
+        varying vec2 vUv;
+
+        void main() {
+            vec4 color = vec4(0.0);
+            vec2 off = u_direction / u_resolution * u_radius;
+            
+            // Simple 9-tap Gaussian blur
+            color += texture2D(u_image, vUv - 4.0 * off) * 0.0162162162;
+            color += texture2D(u_image, vUv - 3.0 * off) * 0.0540540541;
+            color += texture2D(u_image, vUv - 2.0 * off) * 0.1216216216;
+            color += texture2D(u_image, vUv - 1.0 * off) * 0.1945945946;
+            color += texture2D(u_image, vUv) * 0.2270270270;
+            color += texture2D(u_image, vUv + 1.0 * off) * 0.1945945946;
+            color += texture2D(u_image, vUv + 2.0 * off) * 0.1216216216;
+            color += texture2D(u_image, vUv + 3.0 * off) * 0.0540540541;
+            color += texture2D(u_image, vUv + 4.0 * off) * 0.0162162162;
+            
+            gl_FragColor = color;
+        }
+    </script>
+
+    <!-- Visualization Shader (with Halftone and Bloom) -->
     <script id="visualizeShader" type="x-shader/x-fragment">
         uniform sampler2D u_dye;
+        uniform sampler2D u_bloom;
+        uniform vec2 u_resolution;
+        uniform bool u_halftone_enabled;
+        uniform float u_halftone_scale;
+        uniform bool u_bloom_enabled;
+        uniform float u_bloom_intensity;
         varying vec2 vUv;
         
         void main() {
-            gl_FragColor = texture2D(u_dye, vUv);
+            vec4 color = texture2D(u_dye, vUv);
+            
+            // Halftone Effect
+            if (u_halftone_enabled) {
+                vec2 center = floor(vUv * u_resolution / u_halftone_scale) * u_halftone_scale / u_resolution + (0.5 * u_halftone_scale / u_resolution);
+                float dist = distance(vUv, center) * u_resolution.x / u_halftone_scale;
+                vec4 dotColor = texture2D(u_dye, center); // Sample original dye for dot color
+                
+                float brightness = dot(dotColor.rgb, vec3(0.299, 0.587, 0.114));
+                float radius = 0.5 * brightness; // Radius based on brightness
+                
+                // Simple circle
+                float smooth_edge = 0.1;
+                float mask = 1.0 - smoothstep(radius - smooth_edge, radius + smooth_edge, dist);
+                
+                // Use the sampled color for the dot, or black/white
+                // Here we keep the color but mask it
+                color = vec4(dotColor.rgb * mask, 1.0);
+            }
+
+            // Bloom Effect (Additive, applied after halftone to glow over the pattern)
+            if (u_bloom_enabled) {
+                vec4 bloomColor = texture2D(u_bloom, vUv);
+                color += bloomColor * u_bloom_intensity;
+            }
+
+            gl_FragColor = color;
         }
     </script>
 
@@ -256,26 +317,33 @@
 
         // --- Simulation Parameters ---
         const default_colors = {
-            mouse: { r: 0.2, g: 0.5, b: 1.0 },
+            mouse: { r: 1.0, g: 0.588, b: 0.267 }, // FF9644
             touches: [
-                { r: 1.0, g: 0.1, b: 0.1 }, // Red
-                { r: 0.1, g: 1.0, b: 0.1 }, // Green
-                { r: 0.1, g: 0.5, b: 1.0 }, // Blue
-                { r: 1.0, g: 1.0, b: 0.1 }, // Yellow
-                { r: 1.0, g: 0.1, b: 1.0 }, // Magenta
+                { r: 1.0, g: 0.831, b: 0.0 },   // FFD400
+                { r: 1.0, g: 0.808, b: 0.6 },   // FFCE99
+                { r: 1.0, g: 0.588, b: 0.267 }, // FF9644
+                { r: 0.961, g: 0.467, b: 0.6 }, // F57799
+                { r: 0.337, g: 0.184, b: 0.0 }, // 562F00
             ]
         };
         
         const sim_params = {
             resolution: 512,
             dt: 0.035,
-            pressure_iterations: 50,
+            pressure_iterations: 10,
             force_radius: 42.0,
             decay: 0.99,
             vorticity: 0.2,
-            dissipation: 0.991,
+            dissipation: 0.995,
             mouse_color: { ...default_colors.mouse },
             touch_colors: default_colors.touches.map(c => ({...c})),
+            // Post-processing
+            halftone_enabled: true,
+            halftone_scale: 0.1,
+            bloom_enabled: true,
+            bloom_intensity: 1.4,
+            bloom_radius: 2.0,
+            bloom_iterations: 4,
         };
 
         // --- Basic Setup ---
@@ -309,6 +377,10 @@
         // One for divergence, one for vorticity
         let divergence_rt = new THREE.WebGLRenderTarget(grid_width, grid_height, rt_options);
         let vorticity_rt = new THREE.WebGLRenderTarget(grid_width, grid_height, rt_options);
+        
+        // Bloom render targets (downscaled for performance and larger blur)
+        let bloom_rt_1 = new THREE.WebGLRenderTarget(Math.floor(grid_width / 2), Math.floor(grid_height / 2), rt_options);
+        let bloom_rt_2 = new THREE.WebGLRenderTarget(Math.floor(grid_width / 2), Math.floor(grid_height / 2), rt_options);
 
 
         // Clear all buffers to start in a known clean state
@@ -321,6 +393,8 @@
             renderer.setRenderTarget(dye_rt_2); renderer.clear();
             renderer.setRenderTarget(divergence_rt); renderer.clear();
             renderer.setRenderTarget(vorticity_rt); renderer.clear();
+            renderer.setRenderTarget(bloom_rt_1); renderer.clear();
+            renderer.setRenderTarget(bloom_rt_2); renderer.clear();
             renderer.setRenderTarget(null);
         }
         clearAllRenderTargets(); // Clear on initialization
@@ -435,13 +509,33 @@
             }
         });
 
+        const bloom_material = new THREE.ShaderMaterial({
+            vertexShader,
+            fragmentShader: document.getElementById('bloomShader').textContent,
+            uniforms: {
+                u_image: { value: null },
+                u_resolution: { value: new THREE.Vector2(grid_width / 2, grid_height / 2) },
+                u_direction: { value: new THREE.Vector2(0, 0) },
+                u_radius: { value: sim_params.bloom_radius },
+            }
+        });
+
         const visualize_material = new THREE.ShaderMaterial({
             vertexShader,
             fragmentShader: document.getElementById('visualizeShader').textContent,
             uniforms: {
-                u_dye: { value: null }
+                u_dye: { value: null },
+                u_bloom: { value: null },
+                u_resolution: { value: new THREE.Vector2(grid_width, grid_height) },
+                u_halftone_enabled: { value: sim_params.halftone_enabled },
+                u_halftone_scale: { value: sim_params.halftone_scale },
+                u_bloom_enabled: { value: sim_params.bloom_enabled },
+                u_bloom_intensity: { value: sim_params.bloom_intensity },
             }
         });
+        
+        // Initialize bloom uniform with a valid texture (even if empty)
+        visualize_material.uniforms.u_bloom.value = bloom_rt_2.texture;
         
         // The mesh uses a null material initially, as it will be set dynamically
         const quad_mesh = new THREE.Mesh(quad_geometry, null);
@@ -465,6 +559,10 @@
             divergence_rt.setSize(grid_width, grid_height);
             vorticity_rt.setSize(grid_width, grid_height);
 
+            // Resize bloom targets (half res)
+            bloom_rt_1.setSize(Math.floor(grid_width / 2), Math.floor(grid_height / 2));
+            bloom_rt_2.setSize(Math.floor(grid_width / 2), Math.floor(grid_height / 2));
+
             // Update resolution uniforms in all materials
             const newResolution = new THREE.Vector2(grid_width, grid_height);
             advection_material.uniforms.u_resolution.value = newResolution;
@@ -475,6 +573,9 @@
             splat_material.uniforms.u_resolution.value = newResolution;
             vorticity_material.uniforms.u_resolution.value = newResolution;
             vorticity_confinement_material.uniforms.u_resolution.value = newResolution;
+            visualize_material.uniforms.u_resolution.value = newResolution;
+            
+            bloom_material.uniforms.u_resolution.value = new THREE.Vector2(Math.floor(grid_width / 2), Math.floor(grid_height / 2));
 
             // Clear everything to reset the simulation state
             clearAllRenderTargets();
@@ -491,11 +592,11 @@
             clearAllRenderTargets();
             // Reset params to defaults
             sim_params.dt = 0.035;
-            sim_params.pressure_iterations = 50;
+            sim_params.pressure_iterations = 10;
             sim_params.force_radius = 42.0;
             sim_params.decay = 0.99;
             sim_params.vorticity = 0.2;
-            sim_params.dissipation = 0.991;
+            sim_params.dissipation = 0.995;
             
             // Reset colors
             Object.assign(sim_params.mouse_color, default_colors.mouse);
@@ -512,6 +613,20 @@
             dissipation_material.uniforms.u_dissipation.value = sim_params.dissipation;
             vorticity_confinement_material.uniforms.u_vorticity_amount.value = sim_params.vorticity;
             
+            // Reset post-processing
+            sim_params.halftone_enabled = true;
+            sim_params.halftone_scale = 0.1;
+            sim_params.bloom_enabled = true;
+            sim_params.bloom_intensity = 1.4;
+            sim_params.bloom_radius = 2.0;
+            sim_params.bloom_iterations = 4;
+            
+            visualize_material.uniforms.u_halftone_enabled.value = sim_params.halftone_enabled;
+            visualize_material.uniforms.u_halftone_scale.value = sim_params.halftone_scale;
+            visualize_material.uniforms.u_bloom_enabled.value = sim_params.bloom_enabled;
+            visualize_material.uniforms.u_bloom_intensity.value = sim_params.bloom_intensity;
+            bloom_material.uniforms.u_radius.value = sim_params.bloom_radius;
+
             refreshGUI();
         }
 
@@ -520,7 +635,7 @@
             advection_material.uniforms.u_dt.value = value;
             vorticity_confinement_material.uniforms.u_dt.value = value;
         });
-        gui.add(sim_params, 'pressure_iterations', 5, 50, 1).name('Pressure Iterations');
+        gui.add(sim_params, 'pressure_iterations', 0.1, 10, 0.1).name('Pressure Iterations');
         gui.add(sim_params, 'force_radius', 1, 100, 1).name('Force Radius').onChange(value => {
             add_force_material.uniforms.u_radius.value = value;
             splat_material.uniforms.u_radius.value = value;
@@ -535,6 +650,24 @@
             vorticity_confinement_material.uniforms.u_vorticity_amount.value = value;
         });
         
+        const post_process_folder = gui.addFolder('Post Processing');
+        post_process_folder.add(sim_params, 'halftone_enabled').name('Halftone').onChange(value => {
+            visualize_material.uniforms.u_halftone_enabled.value = value;
+        });
+        post_process_folder.add(sim_params, 'halftone_scale', 0.1, 4.0, 0.1).name('Halftone Scale').onChange(value => {
+            visualize_material.uniforms.u_halftone_scale.value = value;
+        });
+        post_process_folder.add(sim_params, 'bloom_enabled').name('Bloom').onChange(value => {
+            visualize_material.uniforms.u_bloom_enabled.value = value;
+        });
+        post_process_folder.add(sim_params, 'bloom_intensity', 0.0, 2.0, 0.01).name('Bloom Intensity').onChange(value => {
+            visualize_material.uniforms.u_bloom_intensity.value = value;
+        });
+        post_process_folder.add(sim_params, 'bloom_radius', 0.0, 5.0, 0.1).name('Bloom Radius').onChange(value => {
+            bloom_material.uniforms.u_radius.value = value;
+        });
+        post_process_folder.add(sim_params, 'bloom_iterations', 1, 8, 1).name('Bloom Iterations');
+
         gui.addColor(sim_params, 'mouse_color').name('Mouse Color');
         
         const touch_colors_folder = gui.addFolder('Touch Colors');
@@ -633,8 +766,6 @@
         
         // --- Animation Loop ---
         function animate() {
-            requestAnimationFrame(animate);
-            
             // 1. Add Forces & Colors from all active pointers
             pointers.forEach((pointer) => {
                 if (pointer.down) {
@@ -715,11 +846,50 @@
             [velocity_rt_1, velocity_rt_2] = [velocity_rt_2, velocity_rt_1]; // Swap
             
             // 9. Visualize the final dye field
+            // If bloom is enabled, we need to generate the bloom texture first
+            if (sim_params.bloom_enabled) {
+                // Pass 1: Horizontal Blur
+                bloom_material.uniforms.u_image.value = dye_rt_1.texture;
+                bloom_material.uniforms.u_direction.value.set(1, 0);
+                renderer.setRenderTarget(bloom_rt_1);
+                quad_mesh.material = bloom_material;
+                renderer.render(scene, camera);
+
+                // Pass 2: Vertical Blur
+                bloom_material.uniforms.u_image.value = bloom_rt_1.texture;
+                bloom_material.uniforms.u_direction.value.set(0, 1);
+                renderer.setRenderTarget(bloom_rt_2);
+                quad_mesh.material = bloom_material;
+                renderer.render(scene, camera);
+
+                // Additional iterations for stronger/smoother blur
+                for (let i = 1; i < sim_params.bloom_iterations; i++) {
+                     // Horizontal
+                    bloom_material.uniforms.u_image.value = bloom_rt_2.texture;
+                    bloom_material.uniforms.u_direction.value.set(1, 0);
+                    renderer.setRenderTarget(bloom_rt_1);
+                    quad_mesh.material = bloom_material;
+                    renderer.render(scene, camera);
+
+                    // Vertical
+                    bloom_material.uniforms.u_image.value = bloom_rt_1.texture;
+                    bloom_material.uniforms.u_direction.value.set(0, 1);
+                    renderer.setRenderTarget(bloom_rt_2);
+                    quad_mesh.material = bloom_material;
+                    renderer.render(scene, camera);
+                }
+
+                visualize_material.uniforms.u_bloom.value = bloom_rt_2.texture;
+            }
+
             visualize_material.uniforms.u_dye.value = dye_rt_1.texture;
+            renderer.setRenderTarget(null);
             quad_mesh.material = visualize_material;
             renderer.render(scene, camera);
-        }
 
+            requestAnimationFrame(animate);
+        }
+        
         animate();
         
         // Handle window resizing
@@ -751,5 +921,6 @@
         });
 
     </script>
+<script type="module" src="/index.tsx"></script>
 </body>
 </html>
