@@ -285,7 +285,11 @@
             // Halftone Effect
             if (u_halftone_enabled) {
                 vec2 center = floor(vUv * u_resolution / u_halftone_scale) * u_halftone_scale / u_resolution + (0.5 * u_halftone_scale / u_resolution);
-                float dist = distance(vUv, center) * u_resolution.x / u_halftone_scale;
+                
+                // Correct distance calculation for aspect ratio by working in pixel space
+                vec2 diff = (vUv - center) * u_resolution;
+                float dist = length(diff) / u_halftone_scale;
+                
                 vec4 dotColor = texture2D(u_dye, center); // Sample original dye for dot color
                 
                 float brightness = dot(dotColor.rgb, vec3(0.299, 0.587, 0.114));
@@ -334,15 +338,15 @@
             force_radius: 42.0,
             decay: 0.99,
             vorticity: 0.2,
-            dissipation: 0.995,
+            dissipation: 0.996,
             mouse_color: { ...default_colors.mouse },
             touch_colors: default_colors.touches.map(c => ({...c})),
             // Post-processing
             halftone_enabled: true,
-            halftone_scale: 0.1,
+            halftone_scale: 4.,
             bloom_enabled: true,
-            bloom_intensity: 1.4,
-            bloom_radius: 2.0,
+            bloom_intensity: 1.5,
+            bloom_radius: 1.5,
             bloom_iterations: 4,
         };
 
@@ -654,7 +658,7 @@
         post_process_folder.add(sim_params, 'halftone_enabled').name('Halftone').onChange(value => {
             visualize_material.uniforms.u_halftone_enabled.value = value;
         });
-        post_process_folder.add(sim_params, 'halftone_scale', 0.1, 4.0, 0.1).name('Halftone Scale').onChange(value => {
+        post_process_folder.add(sim_params, 'halftone_scale', 0.1, 10.0, 0.1).name('Halftone Scale').onChange(value => {
             visualize_material.uniforms.u_halftone_scale.value = value;
         });
         post_process_folder.add(sim_params, 'bloom_enabled').name('Bloom').onChange(value => {
